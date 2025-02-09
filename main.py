@@ -1,125 +1,178 @@
 import os
-import glob
+
+# import glob
 import argparse
 import requests
 import html
+import shutil
 from langchain_community.document_loaders import DirectoryLoader, PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import FAISS
-from langchain_community.embeddings.ollama import (
-    OllamaEmbeddings,
-)  # Updated import for OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 
-
+# Paths
 FAISS_PATH = r"C:\Users\El-Amrani\RAG\FAISS_DB"
 DOC_FILES = r"C:\Users\El-Amrani\RAG\data"
 
+# ------------------------------- #
+#  ✅ Embedding & FAISS Functions  #
+# ------------------------------- #
+
 
 def get_embedding_function():
-    """Initialize the Ollama embedding function."""
-    # embeddings = OllamaEmbeddings(model="deepseek-r1:1.5b")
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
-    return embeddings
+    """Use a dedicated embedding model for FAISS."""
+    return OllamaEmbeddings(model="nomic-embed-text")
 
 
 def load_or_create_faiss(chunks):
-    """Load or create a FAISS vector store."""
+    """Load or create a FAISS vector store with metadata tracking."""
     embedding_function = get_embedding_function()
+
     if os.path.exists(FAISS_PATH):
-        print(f"Loading existing FAISS index from {FAISS_PATH}")
+        print(f"📂 Loading existing FAISS index from {FAISS_PATH}")
         vector_store = FAISS.load_local(
-            FAISS_PATH,
-            embedding_function,
-            allow_dangerous_deserialization=True,  # Enable this flag for trusted data
+            FAISS_PATH, embedding_function, allow_dangerous_deserialization=True
         )
     else:
-        print("Creating new FAISS index...")
-        vector_store = FAISS.from_texts(chunks, embedding_function)
+        print("✨ Creating new FAISS index...")
+        vector_store = FAISS.from_documents(chunks, embedding_function)
         vector_store.save_local(FAISS_PATH)
-        print(f"FAISS index saved to {FAISS_PATH}")
+        print(f"✅ FAISS index saved to {FAISS_PATH}")
+
     return vector_store
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--docs_dir",
-        type=str,
-        default=DOC_FILES,
-    )
-    parser.add_argument(
-        "--ollama_url", type=str, default="http://localhost:11434/api/generate"
-    )
+# -------------------------------- #
+#  ✅ Document Processing Functions #
+# -------------------------------- #
 
+
+def load_documents():
+    """Load all PDFs from the specified directory."""
+    loader = DirectoryLoader(
+        DOC_FILES, loader_cls=PyMuPDFLoader, recursive=False, glob="*.pdf"
+    )
+    return loader.load()
+
+
+def split_documents(documents):
+    """Split documents into chunks, keeping metadata (source file & page number)."""
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = text_splitter.split_documents(documents)
+
+    return calculate_chunk_ids(chunks)
+
+
+def calculate_chunk_ids(chunks):
+    """Assigns unique IDs based on source file & page number."""
+    last_page_id = None
+    current_chunk_index = 0
+
+    for chunk in chunks:
+        source = chunk.metadata.get("source", "unknown.pdf")
+        page = chunk.metadata.get("page", "unknown")
+        current_page_id = f"{source}:{page}"
+
+        if current_page_id == last_page_id:
+            current_chunk_index += 1
+        else:
+            current_chunk_index = 0
+
+        chunk.metadata["id"] = f"{current_page_id}:{current_chunk_index}"
+        last_page_id = current_page_id
+
+    return chunks
+
+
+def clear_database():
+    """Deletes the FAISS index to reset the database."""
+    if os.path.exists(FAISS_PATH):
+        shutil.rmtree(FAISS_PATH)
+        print("🚀 Database cleared!")
+
+
+# -------------------------------- #
+#  ✅ Chat & Retrieval Functions   #
+# -------------------------------- #
+
+
+def query_ollama(user_query, context):
+    """Query DeepSeek model with retrieved context."""
+    payload = {
+        "model": "deepseek-r1:1.5b",
+        "prompt": f"Context:\n{context}\n\nQuestion: {user_query}\nAnswer:",
+        "stream": False,
+        "temperature": 0.7,
+    }
+
+    url = "http://localhost:11434/api/generate"
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+
+        data = response.json()
+        raw_response = data.get("response", "No response received")
+        clean_response = html.unescape(raw_response)
+
+        if "<think>" in clean_response:
+            clean_response = clean_response.split("</think>")[-1].strip()
+
+        return clean_response
+
+    except requests.exceptions.RequestException as e:
+        return f"Error querying Ollama model: {e}"
+
+
+# ------------------------------- #
+#  ✅ Main Execution Function     #
+# ------------------------------- #
+
+
+def main():
+    """Main function for processing PDFs and running the RAG chat."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--reset", action="store_true", help="Reset the database.")
     args = parser.parse_args()
 
-    print(f"Using data dir {args.docs_dir}")
-    print(f"Using FAISS index path {FAISS_PATH}")
-    print(f"Using Ollama model URL {args.ollama_url}")
+    if args.reset:
+        clear_database()
 
-    # Step 1: Load PDFs
-    files = glob.glob(f"{args.docs_dir}/*.pdf", recursive=False)
-    print(f"Matched files: {files}")
+    print(f"📂 Using data dir: {DOC_FILES}")
+    print(f"🗄️ Using FAISS index path: {FAISS_PATH}")
 
-    loader = DirectoryLoader(
-        args.docs_dir,
-        loader_cls=PyMuPDFLoader,
-        recursive=False,
-        silent_errors=True,
-        show_progress=True,
-        glob="*.pdf",
-    )
+    documents = load_documents()
+    chunks = split_documents(documents)
+    print(f"📄 Processed {len(documents)} documents into {len(chunks)} chunks.")
 
-    docs = loader.load()
-    print(f"📄 Loaded {len(docs)} PDF documents.")
-
-    # Step 2: Split text into chunks
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = []
-    for i, doc in enumerate(docs):
-        print(f"📜 Splitting Document {i + 1}...")
-        splits = text_splitter.split_text(doc.page_content)
-        chunks.extend(splits)
-        print(f"Document {i + 1} split into {len(splits)} chunks.")
-    print(f"Total chunks created: {len(chunks)}")
-
-    # Step 3: Load or create FAISS vector store
     vector_store = load_or_create_faiss(chunks)
 
-    # Step 4: Chat with the RAG system
     while True:
-        user_query = input("Enter your query (or 'exit' to quit): ").strip()
+        user_query = input("\n💬 Enter your query (or 'exit' to quit): ").strip()
         if user_query.lower() == "exit":
-            print("Exiting...")
+            print("👋 Exiting...")
             break
 
-        # Step 5: Retrieve relevant documents
-        results = vector_store.similarity_search(user_query, k=3)
-        context = "\n\n".join([res.page_content for res in results])
-        print(f"Context retrieved: {len(results)} chunks")
+        # Step 4: Retrieve relevant chunks
+        results = vector_store.similarity_search(user_query, k=20)
+        if not results:
+            print("⚠️ No relevant context found!")
+            continue
 
-        # Step 6: Query the Ollama model
-        payload = {
-            "prompt": f"Context:\n{context}\n\nQuestion: {user_query}\nAnswer:",
-            "model": "deepseek-r1:1.5b",
-            "stream": False,
-        }
-        try:
-            response = requests.post(args.ollama_url, json=payload)
-            response.raise_for_status()
-            data = response.json()
+        # Build context with metadata (showing file + page number)
+        context = ""
+        for i, doc in enumerate(results):
+            source = doc.metadata.get("source", "unknown.pdf")
+            page = doc.metadata.get("page", "unknown")
 
-            # ✅ Extract the raw response
-            raw_response = data.get("response", "No response received")
+            print(f"Context based on the **[{source} - Page {page}]**")
 
-            # ✅ Decode HTML entities (e.g., \u003c becomes <)
-            clean_response = html.unescape(raw_response)
-            print(clean_response)
-            # print(
-            #     f"Ollama Response: {response.json().get('response', 'No response key in JSON')}"
-            # )
-        except requests.exceptions.RequestException as e:
-            print(f"Error querying Ollama model: {e}")
+            context += f"\n📄 **[{source} - Page {page}]**\n{doc.page_content}\n"
+
+        print(f"📚 Context retrieved from {len(results)} chunks")
+
+        # Step 5: Ask DeepSeek model
+        answer = query_ollama(user_query, context)
+        print(f"\n🤖 **DeepSeek Answer:**\n{answer}\n")
 
 
 if __name__ == "__main__":
