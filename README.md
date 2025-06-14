@@ -2,10 +2,7 @@
 `L-DAIA 2024-2025`
 
 Made by:
-- `EL-AMRANI YOUSSEF`
-- `MAKHLOUK ANASS`
-- `BENHADAR MOHAMED`
-- `ELANSAR YACIN`
+- [@REp007(El-amrani Youssef)](https://github.com/REp007)
 
 ## **Table des matières**
 
